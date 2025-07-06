@@ -2,7 +2,7 @@ from typing import Callable, Optional, BinaryIO, Self
 from multiprocessing.shared_memory import SharedMemory
 from threading import Barrier
 from struct import calcsize, pack_into, unpack_from
-
+from collections.abc import Buffer
 
 
 class SHMFanoutBuffer:
@@ -36,7 +36,11 @@ class SHMFanoutBuffer:
         self._mv = self._shmem.buf[self._sz_width:]
     
     @property
-    def name(self):
+    def name(self) -> str:
+        """
+        Returns:
+            str: name of the underlying shared memory buffer
+        """
         return self._shmem.name
     
     def save_size(self, new_size: int = None):
@@ -51,7 +55,15 @@ class SHMFanoutBuffer:
         """
         self._size = unpack_from(self._sz_struct, self._shmem.buf, 0)[0]
     
-    def save_bytes(self, data) -> int:
+    def save_bytes(self, data: Buffer) -> int:
+        """Writes data to the buffer
+
+        Args:
+            data (Buffer): insert data into buffer starting at beginning
+
+        Returns:
+            int: number of bytes put into buffer. can be truncated if data is larger than buffer
+        """
         addlen = min(len(data), self._max)
         self._shmem.buf[self._sz_width:addlen] = data[:addlen]
         self._size = addlen
@@ -59,6 +71,11 @@ class SHMFanoutBuffer:
         return addlen
     
     def load_bytes(self) -> memoryview:
+        """Load size of data in buffer and return snapshot
+
+        Returns:
+            memoryview: data loaded into buffer
+        """
         self.load_size()
         return self.snapshot()
     
@@ -93,7 +110,11 @@ class SHMFanoutBuffer:
             del self._shmem
 
     @property
-    def buf(self):
+    def buf(self) -> memoryview:
+        """
+        Returns:
+            memoryview: memoryview of the underlying buffer
+        """
         return self._mv
     
     @property
@@ -127,12 +148,21 @@ class SHMBufferSync:
     timeout: float|None
 
     def __init__(self, shm_name: str, barrier: Barrier|None, timeout: float|None = None):
+        """Multiprocessing sync object for handling fanout buffers.
+
+        Args:
+            shm_name (str): name of the buffer. this is used to load an already initialized shared memory
+            barrier (Barrier | None): barrier sync object associated with the buffer
+            timeout (float | None, optional): default timeout when waiting on barrier. Defaults to None.
+        """
         self.shm_name = shm_name
         self.barrier = barrier
         self._buffer = None
         self.timeout = timeout
     
-    def load_buffer(self):
+    def load_buffer(self) -> Self:
+        """Get reference to a shared memory buffer using the name. Buffer must already be created - this does not create a new one.
+        """
         if self._buffer is None:
             self._buffer = SHMFanoutBuffer(size=0, name=self.shm_name, create=False)
     
@@ -141,7 +171,7 @@ class SHMBufferSync:
             self._buffer.close()
     
     @property
-    def shmbuffer(self):
+    def shmbuffer(self) -> SHMFanoutBuffer:
         return self._buffer
     
     def wait(self, timeout: float|None = None):
