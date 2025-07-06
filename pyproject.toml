@@ -11,7 +11,7 @@ authors = [
 description = "Classes and utilities for storing and cataloguing files"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = [ "filelock" ]
+dependencies = [ "filelock", "python-magic" ]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
