@@ -25,8 +25,8 @@ class SHMProcessor:
         for arg in buff_syncs:
             if isinstance(arg, SHMBufferSync):
                 self._buff_syncs.add(arg)
-        if len(self._buff_syncs) == 0:
-            raise ValueError("No shared memory buffers")
+        if len(self._buff_syncs) < 2:
+            raise ValueError("Insufficient SHMBuffers: Minimum of 2 is required.")
         self.bytes_processed = 0
         self.reporting = None
     
