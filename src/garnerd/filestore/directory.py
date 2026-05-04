@@ -115,6 +115,9 @@ class DirectoryFileStore:
         fname = f"{path_key[self.dir_depth:]}.{size_string}"
         return self.path / subdirs / fname
     
+    def lock_path(self, path_key: str, file_size: int) -> Path:
+        return self.file_path(path_key=path_key, file_size=file_size).with_suffix(".lock")
+    
     def init_store(self) -> tuple[int,int]:
         """Creates all required store directories if needed and counts already stored files
 
@@ -219,7 +222,7 @@ class DirectoryFileStore:
             raise InvalidFileError(f"source path is not a valid file")
         
         dst = self.file_path(path_key=path_key, file_size=file_size)
-        lock = FileLock(dst)
+        lock = FileLock(self.lock_path(path_key=path_key, file_size=file_size))
         with lock:
             if not dst.exists():
                 if not dst.parent.exists():
@@ -242,7 +245,7 @@ class DirectoryFileStore:
             bool: True if the file does not exist in the store regardless if this action removed the file.
         """
         fpath = self.file_path(path_key=path_key, file_size=file_size)
-        lock = FileLock(f"{fpath}.lock")
+        lock = FileLock(self.lock_path(path_key=path_key, file_size=file_size))
         with lock:
             if fpath.exists() and fpath.is_file():
                 fpath.unlink()
