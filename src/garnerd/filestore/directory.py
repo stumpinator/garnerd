@@ -1,10 +1,13 @@
 from pathlib import Path
 from typing import Callable, Iterator
-from shutil import disk_usage
-from filelock import FileLock
-from os import walk
+from shutil import disk_usage, move
+from filelock import FileLock, AsyncFileLock
+from os import walk, chmod
 
 from ..exceptions import InvalidDirectoryError, InvalidFileError, InvalidFileSize, InvalidPath
+
+import asyncio
+import aiofiles.os
 
 
 def size_to_basex(size: int, base_text="0123456789abcdefghijklmnopqrstuv") -> str:
@@ -22,6 +25,7 @@ class DirectoryFileStore:
     min_free_bytes: int
     max_file_size: int
     size_to_string: Callable[[int], str]
+    use_file_lock: bool
     initialized: bool
     dir_mode: int
     file_mode: int
@@ -60,6 +64,7 @@ class DirectoryFileStore:
         self.dir_mode = 740
         self.file_mode = 440
         self._stored = 0
+        self.use_file_lock = True
         
         if min_free >= 0 and min_free < 100:
             self.min_free = min_free
@@ -80,6 +85,19 @@ class DirectoryFileStore:
         """
         fpath = self.file_path(path_key=path_key, file_size=file_size)
         return fpath.exists() and fpath.is_file()
+    
+    async def has_file_async(self, path_key: str, file_size: int):
+        """asynchronously check if a file exists in a the store
+
+        Args:
+            path_key (str): a unique identifier for a file. typicall a hash.
+            file_size (int): the size in bytes of the file
+
+        Returns:
+            bool: True if file exists
+        """
+        fpath = self.file_path(path_key=path_key, file_size=file_size)
+        return await aiofiles.os.path.isfile(str(fpath))
     
     def file_path(self, path_key: str, file_size: int) -> Path:
         """generate a unique file path for this store
@@ -128,6 +146,16 @@ class DirectoryFileStore:
         self._stored = self.count_stored()
         return dcount,self._stored
     
+    async def init_store_async(self) -> tuple[int,int]:
+        """Asynchronously creates all required store directories if needed and counts already stored files
+
+        Returns:
+            tuple[int,int]: directories created, file stored
+        """
+        dcount = await self.create_dirs_async(self.path)
+        self._stored = await self.count_stored_async()
+        return dcount,self._stored
+    
     def enum_sub_dirs(self, base_dir: str|Path = None, depth: int = 1, max_depth: int = None) -> Iterator[Path]:
         """Enumerates all bottom level directories used by the store
 
@@ -165,11 +193,19 @@ class DirectoryFileStore:
         Returns:
             int: number of directories created. will be 0 if they already exist.
         """
+        return asyncio.run(self.create_dirs_async())
+    
+    async def create_dirs_async(self) -> int:
+        """Asynchronously creates all directories used to store files
+
+        Returns:
+            int: number of directories created. will be 0 if they already exist.
+        """
         fdirs = self.enum_sub_dirs()
         created = 0
         for fdir in fdirs:
-            if not fdir.exists():
-                fdir.mkdir(modr=self.dir_mode, parents=True, exist_ok=True)
+            if not await aiofiles.os.path.isdir(str(fdir)):
+                await aiofiles.os.makedirs(str(fdir), mode=self.dir_mode, exist_ok=True)
                 created += 1
         return created
     
@@ -199,6 +235,9 @@ class DirectoryFileStore:
         for d in self.enum_sub_dirs():
             count += sum(1 for x in d.glob('*') if not x.match('*.lock'))
         return count
+    
+    async def count_stored_async(self) -> int:
+        return await asyncio.to_thread(self.count_stored)
     
     def add_file(self, source_path: str, path_key: str, file_size: int) -> bool:
         """Adds a file to the store
@@ -234,6 +273,39 @@ class DirectoryFileStore:
                 src.unlink()
         return dst.exists()
     
+    async def add_file_async(self, source_path: str, path_key: str, file_size: int) -> bool:
+        """Asynchronously adds a file to the store
+
+        Args:
+            source_path (str): source file to add
+            path_key (str): a unique identifier for a file. typicall a hash
+            file_size (int): the size in bytes of the file
+
+        Raises:
+            InvalidFileError: source_path is an invalid file
+            InvalidDirectoryError: the directory this file is to be moved to doesn't exist.
+                This is most likely because the store was not initialized.
+
+        Returns:
+            bool: True if the file exists in the store regardless if this action added the file.
+        """
+        src = source_path or ''
+        if not await aiofiles.os.path.isfile(src):
+            raise InvalidFileError(f"source path {src} is not a valid file")
+        
+        dst = self.file_path(path_key=path_key, file_size=file_size)
+        lock = AsyncFileLock(self.lock_path(path_key=path_key, file_size=file_size))
+        async with lock:
+            if not await aiofiles.os.path.isfile(str(dst)):
+                if not await aiofiles.os.path.isdir(str(dst.parent)):
+                    raise InvalidDirectoryError(f"Parent directory {str(dst.parent)} does not exist.")
+                await aiofiles.os.rename(src, str(dst))
+                await asyncio.to_thread(chmod, str(dst), self.file_mode)
+                self._stored += 1
+            else:
+                await aiofiles.os.remove(src)
+        return await aiofiles.os.path.isfile(str(dst))
+    
     def remove_file(self, path_key: str, file_size: int) -> bool:
         """Remove a file from the store
 
@@ -252,6 +324,25 @@ class DirectoryFileStore:
                 self._stored -= 1
         return not fpath.exists()
 
+    async def remove_file_async(self, path_key: str, file_size: int) -> bool:
+        """Asynchronously remove a file from the store
+
+        Args:
+            path_key (str): a unique identifier for a file. typicall a hash
+            file_size (int): the size in bytes of the file
+
+        Returns:
+            bool: True if the file does not exist in the store regardless if this action removed the file.
+        """
+        fpath = self.file_path(path_key=path_key, file_size=file_size)
+        lock = AsyncFileLock(self.lock_path(path_key=path_key, file_size=file_size))
+        async with lock:
+            if await aiofiles.os.path.isfile(str(fpath)):
+                await aiofiles.os.remove(str(fpath))
+                if self._stored > 0:
+                    self._stored -= 1
+        return not fpath.exists()
+    
     def get_free(self) -> float:
         """
         Returns:
@@ -260,12 +351,28 @@ class DirectoryFileStore:
         du = disk_usage(str(self.path))
         return (du.free / du.total) * 100
     
+    async def get_free_async(self) -> float:
+        """
+        Returns:
+            float: percentage of free disk space in the filesystem used by the store
+        """
+        du = await asyncio.to_thread(disk_usage, str(self.path))
+        return (du.free / du.total) * 100
+    
     def get_free_bytes(self) -> int:
         """
         Returns:
             int: number of free bytes in the filesystem used by the store
         """
         du = disk_usage(str(self.path))
+        return du.free
+    
+    async def get_free_bytes_async(self) -> int:
+        """
+        Returns:
+            int: number of free bytes in the filesystem used by the store
+        """
+        du = await asyncio.to_thread(disk_usage, str(self.path))
         return du.free
     
     def files_stored(self) -> int:
@@ -287,7 +394,21 @@ class DirectoryFileStore:
         Returns:
             bool: True if the file can be added
         """
-        if self.get_free_bytes() < self.min_free_bytes:
+        return asyncio.run(self.can_store_async(file_size=file_size))
+    
+    async def can_store_async(self, file_size: int) -> bool:
+        """Asynchronously determine if a file can be stored
+
+        Args:
+            file_size (int): size of file to be added
+
+        Raises:
+            InvalidFileSize: passed size was not valid integer >= 0
+
+        Returns:
+            bool: True if the file can be added
+        """
+        if await self.get_free_bytes_async() < self.min_free_bytes:
             return False
         if self.files_stored() >= self.max_files:
             return False
