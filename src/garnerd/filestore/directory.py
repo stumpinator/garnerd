@@ -4,7 +4,7 @@ from shutil import disk_usage, move
 from filelock import FileLock, AsyncFileLock
 from os import walk, chmod
 
-from ..exceptions import InvalidDirectoryError, InvalidFileError, InvalidFileSize, InvalidPath
+from garnerd.exceptions import InvalidDirectoryError, InvalidFileError, InvalidFileSize, InvalidPath
 
 import asyncio
 import aiofiles.os
@@ -142,7 +142,7 @@ class DirectoryFileStore:
         Returns:
             tuple[int,int]: directories created, file stored
         """
-        dcount = self.create_dirs(self.path)
+        dcount = self.create_dirs()
         self._stored = self.count_stored()
         return dcount,self._stored
     
@@ -152,7 +152,7 @@ class DirectoryFileStore:
         Returns:
             tuple[int,int]: directories created, file stored
         """
-        dcount = await self.create_dirs_async(self.path)
+        dcount = await self.create_dirs_async()
         self._stored = await self.count_stored_async()
         return dcount,self._stored
     
@@ -174,8 +174,6 @@ class DirectoryFileStore:
         if not isinstance(depth, int) or depth < 1:
             raise ValueError("depth must be integer >= 1")
         max_depth = max_depth or self.dir_depth
-        if not isinstance(max_depth, int) or max_depth < depth:
-            raise ValueError("max_depth must be integer >= depth")
         
         pd = base_dir or self.path
         pd: Path = Path(pd)
