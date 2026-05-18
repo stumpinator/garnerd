@@ -5,7 +5,7 @@ from src.garnerd.filestore.directory import DirectoryFileStore
 from tempfile import TemporaryDirectory
 
 
-class TestGarnerd(unittest.TestCase):
+class TestDirectoryFileStore(unittest.TestCase):
     
     def setUp(self):
         pass
@@ -21,7 +21,7 @@ class TestGarnerd(unittest.TestCase):
     def tearDownClass(cls):
         return super().tearDownClass()
     
-    def testDirectoryFileStore_file_path(self):
+    def test_file_path(self):
         with TemporaryDirectory(dir='/dev/shm') as tdir:
             fs = DirectoryFileStore(tdir, dir_depth=6)
             t: Path = fs.file_path(path_key='56bb3d0a2a7f294967f02dbc2de2a403ae3ba98b124d840273a6e46e081cf67c', file_size=123)
@@ -29,7 +29,7 @@ class TestGarnerd(unittest.TestCase):
             self.assertEqual(str(t.parent), f'{tdir}/5/6/b/b/3/d')
             self.assertEqual(str(t), f'{tdir}/5/6/b/b/3/d/0a2a7f294967f02dbc2de2a403ae3ba98b124d840273a6e46e081cf67c.3r')
     
-    def testDirectoryFileStore_enum_sub_dirs(self):
+    def test_enum_sub_dirs(self):
         with TemporaryDirectory(dir='/dev/shm') as tdir:
             dfs = DirectoryFileStore(path=tdir)
             subdirs = list(dfs.enum_sub_dirs())
@@ -41,7 +41,7 @@ class TestGarnerd(unittest.TestCase):
             subdirs = list(dfs.enum_sub_dirs())
         self.assertEqual(len(subdirs), 4 ** 3)
         
-    def testDirectoryFileStore_create_dirs(self):
+    def test_create_dirs(self):
         with TemporaryDirectory(dir='/dev/shm') as tdir:
             dfs = DirectoryFileStore(path=tdir)
             dfs.dir_depth = 2
@@ -62,7 +62,7 @@ class TestGarnerd(unittest.TestCase):
         self.assertEqual(len(subdirs), created)
         self.assertEqual(recreated, 0)
         
-    def testDirectoryFileStore_init_store(self):
+    def test_init_store(self):
         with TemporaryDirectory(dir='/dev/shm') as tdir:
             dfs = DirectoryFileStore(path=tdir)
             dfs.dir_depth = 2
