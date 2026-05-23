@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Callable, Iterator
-from shutil import disk_usage, move
+from shutil import disk_usage, copy
 from filelock import FileLock, AsyncFileLock
 from os import walk, chmod
 
@@ -15,6 +15,37 @@ def size_to_basex(size: int, base_text="0123456789abcdefghijklmnopqrstuv") -> st
     if size < base:
         return base_text[size]
     return size_to_basex(size // base, base_text=base_text) + base_text[size % base]
+
+
+class AsyncDummyLock:
+    """An asynchronous lock that doesn't actually lock anything."""
+    
+    async def __aenter__(self):
+        # Allow the coroutine to pause briefly, yielding control
+        # back to the event loop, without holding any actual lock.
+        await asyncio.sleep(0)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        # No lock to release
+        pass
+
+
+class DummyLock:
+    def acquire(self, blocking=True, timeout=-1):
+        # Always return True to simulate a successful acquisition
+        return True
+
+    def release(self):
+        # Do nothing; the "lock" is never actually held
+        pass
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
 
 
 class DirectoryFileStore:
@@ -61,8 +92,8 @@ class DirectoryFileStore:
         self.max_file_size = max_file_size
         self.size_to_string = size_to_string
         self.initialized = False
-        self.dir_mode = 740
-        self.file_mode = 440
+        self.dir_mode = 770
+        self.file_mode = 660
         self._stored = 0
         self.use_file_lock = True
         
@@ -85,6 +116,27 @@ class DirectoryFileStore:
         """
         fpath = self.file_path(path_key=path_key, file_size=file_size)
         return fpath.exists() and fpath.is_file()
+    
+    def get_lock(self, file_path: str, is_async: bool = False) -> AsyncDummyLock|DummyLock|AsyncFileLock|FileLock:
+        """Return a lock. If use_file_lock option is not set to True, returns dummy locks that don't do anything.
+
+        Args:
+            file_path (str): file path to the lock
+            is_async (bool, optional): create Async locks. Defaults to False.
+
+        Returns:
+            AsyncDummyLock|DummyLock|AsyncFileLock|FileLock: Lock type depending on options
+        """
+        if not self.use_file_lock:
+            if is_async:
+                return AsyncDummyLock()
+            else:
+                return DummyLock()
+        else:
+            if is_async:
+                return AsyncFileLock(lock_file=file_path)
+            else:
+                return FileLock(lock_file=file_path)
     
     async def has_file_async(self, path_key: str, file_size: int):
         """asynchronously check if a file exists in a the store
@@ -134,7 +186,8 @@ class DirectoryFileStore:
         return self.path / subdirs / fname
     
     def lock_path(self, path_key: str, file_size: int) -> Path:
-        return self.file_path(path_key=path_key, file_size=file_size).with_suffix(".lock")
+        file_path = self.file_path(path_key=path_key, file_size=file_size)
+        return file_path.with_suffix(file_path.suffix + ".lock")
     
     def init_store(self) -> tuple[int,int]:
         """Creates all required store directories if needed and counts already stored files
@@ -237,13 +290,14 @@ class DirectoryFileStore:
     async def count_stored_async(self) -> int:
         return await asyncio.to_thread(self.count_stored)
     
-    def add_file(self, source_path: str, path_key: str, file_size: int) -> bool:
+    def add_file(self, source_path: str, path_key: str, file_size: int, rename: bool = False) -> bool:
         """Adds a file to the store
 
         Args:
             source_path (str): source file to add
             path_key (str): a unique identifier for a file. typicall a hash
             file_size (int): the size in bytes of the file
+            rename (bool): rename the file. if False, will make a copy
 
         Raises:
             InvalidFileError: source_path is an invalid file
@@ -259,25 +313,29 @@ class DirectoryFileStore:
             raise InvalidFileError(f"source path is not a valid file")
         
         dst = self.file_path(path_key=path_key, file_size=file_size)
-        lock = FileLock(self.lock_path(path_key=path_key, file_size=file_size))
+        lock = self.get_lock(file_path=self.lock_path(path_key=path_key, file_size=file_size), is_async=False)
         with lock:
             if not dst.exists():
                 if not dst.parent.exists():
                     raise InvalidDirectoryError(f"Parent directory {str(dst.parent)} does not exist.")
-                src.rename(dst)
+                if rename:
+                    src.rename(dst)
+                else:
+                    copy(str(src), str(dst))
                 dst.chmod(mode=self.file_mode)
                 self._stored += 1
             else:
                 src.unlink()
         return dst.exists()
     
-    async def add_file_async(self, source_path: str, path_key: str, file_size: int) -> bool:
+    async def add_file_async(self, source_path: str, path_key: str, file_size: int, rename: bool = False) -> bool:
         """Asynchronously adds a file to the store
 
         Args:
             source_path (str): source file to add
             path_key (str): a unique identifier for a file. typicall a hash
             file_size (int): the size in bytes of the file
+            rename (bool): rename the file. if False, will make a copy
 
         Raises:
             InvalidFileError: source_path is an invalid file
@@ -292,12 +350,15 @@ class DirectoryFileStore:
             raise InvalidFileError(f"source path {src} is not a valid file")
         
         dst = self.file_path(path_key=path_key, file_size=file_size)
-        lock = AsyncFileLock(self.lock_path(path_key=path_key, file_size=file_size))
+        lock = self.get_lock(file_path=self.lock_path(path_key=path_key, file_size=file_size), is_async=True)
         async with lock:
             if not await aiofiles.os.path.isfile(str(dst)):
                 if not await aiofiles.os.path.isdir(str(dst.parent)):
                     raise InvalidDirectoryError(f"Parent directory {str(dst.parent)} does not exist.")
-                await aiofiles.os.rename(src, str(dst))
+                if rename:
+                    await aiofiles.os.rename(src, str(dst))
+                else:
+                    await asyncio.to_thread(copy, src, str(dst))    
                 await asyncio.to_thread(chmod, str(dst), self.file_mode)
                 self._stored += 1
             else:
@@ -315,11 +376,12 @@ class DirectoryFileStore:
             bool: True if the file does not exist in the store regardless if this action removed the file.
         """
         fpath = self.file_path(path_key=path_key, file_size=file_size)
-        lock = FileLock(self.lock_path(path_key=path_key, file_size=file_size))
+        lock = self.get_lock(file_path=self.lock_path(path_key=path_key, file_size=file_size), is_async=False)
         with lock:
-            if fpath.exists() and fpath.is_file():
+            if fpath.is_file():
                 fpath.unlink()
-                self._stored -= 1
+                if self._stored > 0:
+                    self._stored -= 1
         return not fpath.exists()
 
     async def remove_file_async(self, path_key: str, file_size: int) -> bool:
@@ -333,7 +395,7 @@ class DirectoryFileStore:
             bool: True if the file does not exist in the store regardless if this action removed the file.
         """
         fpath = self.file_path(path_key=path_key, file_size=file_size)
-        lock = AsyncFileLock(self.lock_path(path_key=path_key, file_size=file_size))
+        lock = self.get_lock(file_path=self.lock_path(path_key=path_key, file_size=file_size), is_async=True)
         async with lock:
             if await aiofiles.os.path.isfile(str(fpath)):
                 await aiofiles.os.remove(str(fpath))
