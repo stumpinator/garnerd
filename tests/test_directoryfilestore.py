@@ -7,6 +7,7 @@ from shutil import rmtree, copy
 from os.path import isdir
 from time import sleep
 
+
 class TestDirectoryFileStore(unittest.TestCase):
     _temp_dir: TemporaryDirectory
     temp_dir: str
@@ -104,6 +105,7 @@ class TestDirectoryFileStore(unittest.TestCase):
         self.clean_temp()
         dfs = DirectoryFileStore(path=self.temp_dir, dir_depth=2)
         added_path = dfs.file_path(path_key=pkey, file_size=fsize)
+        dfs.init_store()
         self.assertFalse(added_path.is_file())
         dfs.add_file(source_path=str(test_file), path_key=pkey, file_size=fsize)
         self.assertTrue(added_path.is_file())
@@ -113,4 +115,11 @@ class TestDirectoryFileStore(unittest.TestCase):
         self.assertTrue(added_path.is_file())
         asyncio.run(dfs.remove_file_async(path_key=pkey, file_size=fsize))
         self.assertFalse(added_path.is_file())
-        
+    
+    def test_path_list(self):
+        self.clean_temp()
+        dfs = DirectoryFileStore(path=self.temp_dir)
+        dfs.dir_depth = 2
+        self.assertEqual(dfs.path_list(path_key="abcd"), ["a","b","cd"])
+        dfs.dir_depth = 3
+        self.assertEqual(dfs.path_list(path_key="abcdef"), ["a","b","c","def"])

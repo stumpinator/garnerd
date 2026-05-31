@@ -50,12 +50,13 @@ class DummyLock:
 
 class DirectoryFileStore:
     path: Path
+    lock_dir: Path
     dir_depth: int
     max_files: int
     min_free: float
     min_free_bytes: int
     max_file_size: int
-    size_to_string: Callable[[int], str]
+    size_encoder: Callable[[int], str]
     use_file_lock: bool
     initialized: bool
     dir_mode: int
@@ -70,7 +71,7 @@ class DirectoryFileStore:
             max_files: int = 999999999,
             min_free: float = 20.0,
             max_file_size: int = (128 * 10124 * 1024 * 1024),
-            size_to_string: Callable[[int], str] = size_to_basex
+            size_encoder: Callable[[int], str] = size_to_basex
         ):
         """Class for storing files in a directory structure.
 
@@ -82,18 +83,19 @@ class DirectoryFileStore:
                 Defaults to 20.0.
             max_file_size (int, optional): max file size before rejecting ingest.
                 Defaults to 128GB (128 * 10124 * 1024 * 1024).
-            size_to_string (Callable[[int], str], optional): function to convert file size to a string.
+            size_encoder (Callable[[int], str], optional): function to convert file size to a string.
                 Used to encode the file size to a smaller string and used as an extension.
                 Defaults to size_to_basex.
         """
         self.path = Path(path)
+        self.lock_dir = self.path / ".locks"
         self.dir_depth = dir_depth
         self.max_files = max_files
         self.max_file_size = max_file_size
-        self.size_to_string = size_to_string
+        self.size_encoder = size_encoder
         self.initialized = False
-        self.dir_mode = 770
-        self.file_mode = 660
+        self.dir_mode = 0o770
+        self.file_mode = 0o660
         self._stored = 0
         self.use_file_lock = True
         
@@ -151,23 +153,21 @@ class DirectoryFileStore:
         fpath = self.file_path(path_key=path_key, file_size=file_size)
         return await aiofiles.os.path.isfile(str(fpath))
     
-    def file_path(self, path_key: str, file_size: int) -> Path:
-        """generate a unique file path for this store
+    def path_list(self, path_key: str) -> list[str]:
+        """breaks down a path key into pieces based on directory depth.
 
         Args:
-            path_key (str): a unique identifier for a file. typicall a hash
-            file_size (int): the size in bytes of the file
+            path_key (str): the path key that will be stored
 
         Raises:
             ValueError: invalid arguments
             InvalidPath: path_key is not long enough to convert to file
-            InvalidFileSize: the size_to_string function failed
 
         Returns:
-            Path: full path to a unique file name
+            list[str]: items making up the path based on dir_depth.
+                the last item will always be the file portion. all others are subdirectories.
+                example: path_key="abcdef1234", dir_depth=3 -> ["a","b","c","def1234"]
         """
-        if not isinstance(file_size, int) or file_size < 0:
-            raise ValueError("Invalid size: must be integer >= 0")
         try:
             int(path_key, 16)
         except ValueError:
@@ -176,18 +176,64 @@ class DirectoryFileStore:
         path_key = path_key.lower()
         if len(path_key) <= self.dir_depth:
             raise InvalidPath(f"path_key must be a string with a length greater than {self.dir_depth}.")
-            
-        size_string = self.size_to_string(file_size)
+        pieces = [path_key[a] for a in range(0,self.dir_depth)]
+        pieces.append(f"{path_key[self.dir_depth:]}")
+        return pieces
+    
+    def size_to_string(self, file_size: int) -> str:
+        """Converts the file's size into a string.
+
+        Args:
+            file_size (int): a size, e.g. bytes, to convert to a string
+
+        Raises:
+            ValueError: invalid size
+            InvalidFileSize: size_encoder function returned an invalid string
+
+        Returns:
+            str: size in encoded string format.
+        """
+        if not isinstance(file_size, int) or file_size < 0:
+            raise ValueError("Invalid size: must be integer >= 0")
+          
+        size_string = self.size_encoder(file_size)
         if len(size_string) < 1:
-            raise InvalidFileSize(f"size_to_string returned invalid string")
+            raise InvalidFileSize(f"size_encoder returned invalid string")
         
-        subdirs = '/'.join(path_key[a] for a in range(0,self.dir_depth))
-        fname = f"{path_key[self.dir_depth:]}.{size_string}"
-        return self.path / subdirs / fname
+        return size_string
+    
+    def _store_file_path(self, path_key: str, file_size: int, prefix: Path|None = None) -> Path:
+        size_string = self.size_to_string(file_size=file_size)
+        pieces = self.path_list(path_key=path_key)
+        fname = pieces.pop(-1)
+        fname = f"{fname}.{size_string}"
+        if prefix:
+            return prefix / Path(*pieces) / fname
+        return Path(*pieces) / fname
+    
+    def file_path(self, path_key: str, file_size: int) -> Path:
+        """generate a unique file path for this store
+
+        Args:
+            path_key (str): a unique identifier for a file. typically a hash
+            file_size (int): the size in bytes of the file
+
+        Returns:
+            Path: full path to a unique file name
+        """
+        return self._store_file_path(path_key=path_key, file_size=file_size, prefix=self.path)
     
     def lock_path(self, path_key: str, file_size: int) -> Path:
-        file_path = self.file_path(path_key=path_key, file_size=file_size)
-        return file_path.with_suffix(file_path.suffix + ".lock")
+        """generate a unique lock for this store
+
+        Args:
+            path_key (str): a unique identifier for a file. typically a hash
+            file_size (int): the size in bytes of the file
+
+        Returns:
+            Path: full path to a unique lock file
+        """
+        return self._store_file_path(path_key=path_key, file_size=file_size, prefix=self.lock_dir)
     
     def init_store(self) -> tuple[int,int]:
         """Creates all required store directories if needed and counts already stored files
@@ -309,10 +355,13 @@ class DirectoryFileStore:
         """
         src = source_path or ''
         src = Path(src)
+        print('src', src)
         if not src.exists() or not src.is_file():
             raise InvalidFileError(f"source path is not a valid file")
         
         dst = self.file_path(path_key=path_key, file_size=file_size)
+        
+        print("destination", dst)
         lock = self.get_lock(file_path=self.lock_path(path_key=path_key, file_size=file_size), is_async=False)
         with lock:
             if not dst.exists():
